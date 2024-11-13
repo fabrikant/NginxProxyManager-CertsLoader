@@ -1,6 +1,7 @@
 import requests
 import json
 import logging
+# import zipfile extractall
 
 logger = logging.getLogger(__name__)
 charset = 'UTF-8'
