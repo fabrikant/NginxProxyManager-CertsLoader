@@ -45,6 +45,22 @@ def get_info(host_adress, token, path, params=None):
             f'Failed to get access key.  Message: message{message}')
     return responce_data
 
+def get_binary(host_adress, token, path):
+    responce_data = None
+    headers = {
+        'Content-Type': f'application/json; charset={charset}',
+        'Authorization': f'Bearer {token}',
+    }
+    url = f'http://{host_adress}{path}'
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200:
+        responce_data = res.content
+        # logger.info(f'The request was completed successfully. {responce_data}')
+    else:
+        message = res.content.decode(charset)
+        logger.error(
+            f'Failed to get access key.  Message: message{message}')
+    return responce_data
 
 def load_certs(host_adress, user_email, user_password):
     token = get_token(host_adress, user_email, user_password)
@@ -54,12 +70,12 @@ def load_certs(host_adress, user_email, user_password):
     # Список проксируемых хостов
     path = '/api/nginx/proxy-hosts'
     params = {'expand': 'owner,access_list,certificate'}
-    resp_json = get_info(host_adress, token, path=path)
+    resp_json = get_info(host_adress, token, path=path, params=params)
 
     # Список сертификатов
     path = '/api/nginx/certificates'
     params = {'expand': 'owner'}
-    resp_json = get_info(host_adress, token, path=path)
+    resp_json = get_info(host_adress, token, path=path, params=params)
     pass
 
     # /api/nginx/certificates/{certID}/download
