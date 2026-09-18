@@ -1,126 +1,168 @@
-import requests
-import shutil
-import json
+import argparse
 import logging
+import os
+import shutil
 import tempfile
 import zipfile
-import os
-import argparse
+
+import requests
 
 logger = logging.getLogger(__name__)
-charset = "UTF-8"
+CHARSET = "UTF-8"
 
 
-def get_token(host_adress, user_email, user_password):
-    token = None
-    url = f"http://{host_adress}/api/tokens"
+def build_url(host_address, path):
+    if host_address.startswith(("http://", "https://")):
+        return f"{host_address.rstrip('/')}{path}"
+    return f"http://{host_address.rstrip('/')} {path}".replace(" ", "")
+
+
+def get_token(host_address, user_email, user_password):
+    url = build_url(host_address, "/api/tokens")
+    headers = {"Content-Type": f"application/json; charset={CHARSET}"}
+    payload = {"identity": user_email, "secret": user_password}
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+    except requests.RequestException as exc:
+        logger.error(f"Failed to get token: {exc}")
+        return None
+
+    if response.status_code == 200:
+        try:
+            token = response.json()["token"]
+            logger.info("Token successfully received")
+            return token
+        except (ValueError, KeyError) as exc:
+            logger.error(f"Invalid token response: {exc}")
+            return None
+
+    logger.error(f"Failed to get access key. Message: {response.text}")
+    return None
+
+
+def get_info(host_address, token, path, params=None):
+    url = build_url(host_address, path)
     headers = {
-        "Content-Type": f"application/json; charset={charset}",
-    }
-    json_data = {
-        "identity": user_email,
-        "secret": user_password,
-    }
-    res = requests.post(url, headers=headers, json=json_data)
-    if res.status_code == 200:
-        token = json.loads(res.content.decode(charset))["token"]
-        logger.info("Token successfully received")
-    else:
-        message = res.content.decode(charset)
-        logger.error(f"Failed to get access key.  Message: message{message}")
-
-    return token
-
-
-def get_info(host_adress, token, path, params=None):
-    responce_data = None
-    headers = {
-        "Content-Type": f"application/json; charset={charset}",
+        "Content-Type": f"application/json; charset={CHARSET}",
         "Authorization": f"Bearer {token}",
     }
-    url = f"http://{host_adress}{path}"
-    res = requests.get(url, headers=headers)
-    if res.status_code == 200:
-        responce_data = json.loads(res.content.decode(charset))
-        logger.info(f"The request was completed successfully. {responce_data}")
-    else:
-        message = res.content.decode(charset)
-        logger.error(f"Failed to get access key.  Message: message{message}")
-    return responce_data
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+    except requests.RequestException as exc:
+        logger.error(f"Request failed: {exc}")
+        return None
+
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            logger.info(f"The request was completed successfully. {data}")
+            return data
+        except ValueError as exc:
+            logger.error(f"Invalid JSON response: {exc}")
+            return None
+
+    logger.error(f"Failed to get access key. Message: {response.text}")
+    return None
 
 
-def get_cert_archive(host_adress, token, path):
+def get_cert_archive(host_address, token, path):
+    url = build_url(host_address, path)
     headers = {
-        "Content-Type": f"application/json; charset={charset}",
+        "Content-Type": f"application/json; charset={CHARSET}",
         "Authorization": f"Bearer {token}",
     }
-    url = f"http://{host_adress}{path}"
-    res = requests.get(url, headers=headers, stream=True)
-    if res.status_code == 200:
-        arch_path = tempfile.NamedTemporaryFile(suffix=".zip").name
-        res.raw.decode_content = True
-        with open(arch_path, "wb") as f:
-            shutil.copyfileobj(res.raw, f)
-            logger.info("The certs archive was downloaded: {arch_path}")
-            return arch_path
-    else:
-        message = res.content.decode(charset)
-        logger.error(f"Failed to download certs archive.  Message: message{message}")
+
+    try:
+        response = requests.get(url, headers=headers, stream=True, timeout=30)
+    except requests.RequestException as exc:
+        logger.error(f"Failed to download certs archive: {exc}")
+        return None
+
+    if response.status_code == 200:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_file:
+            archive_path = temp_file.name
+
+        try:
+            response.raw.decode_content = True
+            with open(archive_path, "wb") as archive_file:
+                shutil.copyfileobj(response.raw, archive_file)
+            logger.info(f"The certs archive was downloaded: {archive_path}")
+            return archive_path
+        except OSError as exc:
+            logger.error(f"Could not save archive: {exc}")
+            if os.path.exists(archive_path):
+                os.remove(archive_path)
+            return None
+
+    logger.error(f"Failed to download certs archive. Message: {response.text}")
     return None
 
 
 def get_cert_id(certs_info, cert_domain_name):
-    for cert_info in certs_info:
-        for domain_name in cert_info["domain_names"]:
+    for cert_info in certs_info or []:
+        for domain_name in cert_info.get("domain_names", []):
             if domain_name == cert_domain_name:
-                id = cert_info["id"]
-                logger.info(f"The cert id={id}")
-                return id
+                cert_id = cert_info["id"]
+                logger.info(f"The cert id={cert_id}")
+                return cert_id
     logger.error("The cert id not found")
     return None
 
 
 def extract_cert(archive_path, key_path, cert_path):
+    key_dir = os.path.dirname(key_path) or "."
+    cert_dir = os.path.dirname(cert_path) or "."
+    os.makedirs(key_dir, exist_ok=True)
+    os.makedirs(cert_dir, exist_ok=True)
+
+    found_key = False
+    found_cert = False
+
     with zipfile.ZipFile(archive_path, "r") as zip_ref:
-        for file_info in zip_ref.filelist:
-            if "fullchain" in file_info.filename:
-                with open(cert_path, "wb") as f:
-                    f.write(zip_ref.read(file_info))
-                    logger.info(f"extract {cert_path}")
-            if "privkey" in file_info.filename:
-                with open(key_path, "wb") as f:
-                    f.write(zip_ref.read(file_info))
-                    logger.info(f"extract {key_path}")
-    zip_ref.close()
+        for file_info in zip_ref.infolist():
+            filename_lower = file_info.filename.lower()
+            if "fullchain" in filename_lower:
+                with open(cert_path, "wb") as cert_file:
+                    cert_file.write(zip_ref.read(file_info))
+                logger.info(f"extract {cert_path}")
+                found_cert = True
+            if "privkey" in filename_lower:
+                with open(key_path, "wb") as key_file:
+                    key_file.write(zip_ref.read(file_info))
+                logger.info(f"extract {key_path}")
+                found_key = True
+
+    if not found_key or not found_cert:
+        raise ValueError("Certificate archive does not contain key or fullchain files")
+
     os.remove(archive_path)
     logger.info(f"remove {archive_path}")
 
 
 def load_certs(
-    host_adress, user_email, user_password, cert_domain_name, key_path, cert_path
+    host_address, user_email, user_password, cert_domain_name, key_path, cert_path
 ):
-    token = get_token(host_adress, user_email, user_password)
-    if token == None:
-        exit(1)
+    token = get_token(host_address, user_email, user_password)
+    if token is None:
+        raise SystemExit(1)
 
-    # Список сертификатов
     path = "/api/nginx/certificates"
     params = {"expand": "owner"}
-    resp_json = get_info(host_adress, token, path=path, params=params)
-    if resp_json == None:
-        exit(1)
+    resp_json = get_info(host_address, token, path=path, params=params)
+    if resp_json is None:
+        raise SystemExit(1)
 
-    # Ищем ID сертификата
     cert_id = get_cert_id(resp_json, cert_domain_name)
-    if cert_id == None:
-        exit(1)
+    if cert_id is None:
+        raise SystemExit(1)
 
-    # Качаем архив
     archive_path = get_cert_archive(
-        host_adress, token, f"/api/nginx/certificates/{cert_id}/download"
+        host_address, token, f"/api/nginx/certificates/{cert_id}/download"
     )
-    if archive_path == None:
-        exit(1)
+    if archive_path is None:
+        raise SystemExit(1)
 
     extract_cert(archive_path, key_path, cert_path)
 
@@ -135,27 +177,24 @@ if __name__ == "__main__":
         description="Nginx Proxy Manager Certificate Downloader"
     )
     parser.add_argument(
-        "-hp", "--host_port", help="Nginx host url and port. Format: 127.0.0.1:81"
+        "-hp",
+        "--host_port",
+        required=True,
+        help="Nginx host url and port. Format: 127.0.0.1:81",
     )
-    parser.add_argument("-u", "--user", help="Nginx user email")
-    parser.add_argument("-p", "--password", help="Nginx user password")
-    parser.add_argument("-d", "--domain", help="Cert domain name")
-    parser.add_argument("-k", "--key", help="Target filename for key file")
-    parser.add_argument("-c", "--cert", help="Target filename for certtificate file")
+    parser.add_argument("-u", "--user", required=True, help="Nginx user email")
+    parser.add_argument("-p", "--password", required=True, help="Nginx user password")
+    parser.add_argument("-d", "--domain", required=True, help="Cert domain name")
+    parser.add_argument(
+        "-k", "--key", required=True, help="Target filename for key file"
+    )
+    parser.add_argument(
+        "-c", "--cert", required=True, help="Target filename for certificate file"
+    )
     args = parser.parse_args()
 
-    args_valid = True
-    arg_values = vars(args)
-    for key in arg_values:
-        if arg_values[key] == None:
-            args_valid = False
-            logger.error(f'argument --{key} is not set')
-            
-    if not args_valid:            
-        exit(1)
-        
     load_certs(
-        host_adress=args.host_port,
+        host_address=args.host_port,
         user_email=args.user,
         user_password=args.password,
         cert_domain_name=args.domain,
